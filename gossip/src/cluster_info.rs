@@ -1766,6 +1766,45 @@ impl ClusterInfo {
                 &self.stats,
             )
         };
+
+        // Temporary fix for anza-xyz/agave#14807
+        //
+        // A validator that boots from genesis with no entrypoint has only its
+        // own ContactInfo in CRDS and no way to push it, because push targets
+        // are sampled from CRDS contact infos and it has none. Its ContactInfo can
+        // only leave in a pull response, and a pull response carries it just
+        // when the caller's bloom filter mask happens to match that one value,
+        // roughly one request in sixty-four. Appending it while the node has no
+        // peers makes every pull request that arrives count instead.
+        //
+        // The condition turns false as soon as any peer's card lands in CRDS,
+        // after which this does nothing.
+        //
+        // let lonely = {
+        //     let gossip_crds = self.gossip.crds.read().unwrap();
+        //     !gossip_crds
+        //         .get_nodes_contact_info()
+        //         .any(|node| *node.pubkey() != self_id)
+        // };
+        // let pull_responses: Vec<Vec<CrdsValue>> = if lonely {
+        //     let keypair = self.keypair();
+        //     let self_contact_info =
+        //         CrdsValue::new(CrdsData::ContactInfo(self.my_contact_info()), &keypair);
+        //     pull_responses
+        //         .into_iter()
+        //         .map(|mut values| {
+        //             if !values.iter().any(|value| {
+        //                 matches!(value.data(), CrdsData::ContactInfo(node) if *node.pubkey() == self_id)
+        //             }) {
+        //                 values.push(self_contact_info.clone());
+        //             }
+        //             values
+        //         })
+        //         .collect()
+        // } else {
+        //     pull_responses
+        // };
+
         // Prioritize more recent values, staked values and ContactInfos.
         let get_score = |value: &CrdsValue| -> u64 {
             let age = now.saturating_sub(value.wallclock());

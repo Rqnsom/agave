@@ -6386,3 +6386,75 @@ fn test_alpenglow_missed_migration_entirely() {
     cluster.restart_node(&node_pubkey, exit_info, SocketAddrSpace::Unspecified);
     cluster.check_for_new_roots(8, test_name, SocketAddrSpace::Unspecified);
 }
+
+/// Cold-starts three validators staked equally in genesis, each gated on
+/// `wait_for_supermajority`, and returns how long the cluster took to form.
+/// No validator and no pair of them reaches the 80% threshold, so all three
+/// must find each other in gossip before the cluster can leave slot 0.
+fn cold_start_supermajority_cluster(peers_as_extra_entrypoints: bool) -> Duration {
+    let node_stakes = vec![DEFAULT_NODE_STAKE; 3];
+    let validator_keys: Vec<_> = iter::repeat_with(|| (ValidatorKeys::new(), true))
+        .take(node_stakes.len())
+        .collect();
+
+    let validator_config = ValidatorConfig {
+        wait_for_supermajority: Some(0),
+        ..ValidatorConfig::default_for_test()
+    };
+
+    let mut config = ClusterConfig {
+        mint_lamports: DEFAULT_MINT_LAMPORTS + node_stakes.iter().sum::<u64>(),
+        node_stakes: node_stakes.clone(),
+        validator_configs: make_identical_validator_configs(&validator_config, node_stakes.len()),
+        validator_keys: Some(validator_keys),
+        skip_warmup_slots: true,
+        peers_as_extra_entrypoints,
+        ..ClusterConfig::default()
+    };
+
+    let started = Instant::now();
+    let _cluster = LocalCluster::new(&mut config, SocketAddrSpace::Unspecified);
+    started.elapsed()
+}
+
+// Far above anything observed; these only catch a cluster that never forms.
+const MAX_CLUSTER_INIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Cold start with one entrypoint per joiner, the bootstrap
+/// (anza-xyz/agave#14807).
+///
+/// ```text
+/// RUST_LOG="error,solana_core::validator=info,solana_local_cluster=info,local_cluster=info" \
+///   cargo test -p solana-local-cluster --test local_cluster \
+///   test_supermajority_cold_start_single_entrypoint -- --exact --nocapture
+/// ```
+#[test]
+#[serial]
+fn test_supermajority_cold_start_single_entrypoint() {
+    agave_logger::setup_with_default(RUST_LOG_FILTER);
+
+    let elapsed = cold_start_supermajority_cluster(false);
+
+    info!("cluster formed in {elapsed:?} with one entrypoint per joiner");
+    assert!(
+        elapsed < MAX_CLUSTER_INIT_TIMEOUT,
+        "cluster never formed: {elapsed:?} elapsed"
+    );
+}
+
+/// Cold start with two entrypoints per joiner, the bootstrap and the other
+/// joiner. Gossip splits the pull requests between them, so the bootstrap is
+/// reached less often and the cluster is slower to form.
+#[test]
+#[serial]
+fn test_supermajority_cold_start_extra_entrypoints() {
+    agave_logger::setup_with_default(RUST_LOG_FILTER);
+
+    let elapsed = cold_start_supermajority_cluster(true);
+
+    info!("cluster formed in {elapsed:?} with two entrypoints per joiner");
+    assert!(
+        elapsed < MAX_CLUSTER_INIT_TIMEOUT,
+        "cluster never formed: {elapsed:?} elapsed"
+    );
+}

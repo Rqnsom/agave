@@ -114,6 +114,10 @@ pub struct ClusterConfig {
     pub poh_config: PohConfig,
     pub additional_accounts: Vec<(Pubkey, AccountSharedData)>,
     pub vote_use_quic: bool,
+    /// Give each non-bootstrap validator the other ones as entrypoints too, on
+    /// the `wait_for_supermajority` start path. Off by default. Gossip picks
+    /// one entrypoint per cycle at random, so fewer pulls reach the bootstrap.
+    pub peers_as_extra_entrypoints: bool,
 }
 
 impl ClusterConfig {
@@ -151,6 +155,7 @@ impl Default for ClusterConfig {
             skip_warmup_slots: false,
             additional_accounts: vec![],
             vote_use_quic: DEFAULT_VOTE_USE_QUIC,
+            peers_as_extra_entrypoints: false,
         }
     }
 }
@@ -382,6 +387,7 @@ impl LocalCluster {
             cluster.start_all_validators_parallel(
                 &config.validator_configs,
                 &validator_keys,
+                config.peers_as_extra_entrypoints,
                 socket_addr_space,
                 (
                     leader_pubkey,
@@ -665,6 +671,7 @@ impl LocalCluster {
         &mut self,
         validator_configs: &[ValidatorConfig],
         validator_keys: &[ValidatorKeys],
+        peers_as_extra_entrypoints: bool,
         socket_addr_space: SocketAddrSpace,
         leader_data: (
             Pubkey,
@@ -723,23 +730,44 @@ impl LocalCluster {
 
         handles.push(handle);
 
+        let validator_nodes: Vec<Node> = validator_keys[1..]
+            .iter()
+            .map(|keys| Node::new_localhost_with_pubkey(&keys.node_keypair.pubkey()))
+            .collect();
+        let peer_infos: Vec<ContactInfo> = validator_nodes
+            .iter()
+            .map(|node| node.info.clone())
+            .collect();
+
         // Start remaining validators
-        for (i, (keys, validator_config)) in validator_keys[1..]
+        for (i, ((keys, validator_config), validator_node)) in validator_keys[1..]
             .iter()
             .zip(validator_configs[1..].iter())
+            .zip(validator_nodes)
             .enumerate()
         {
             let validator_keypair = keys.node_keypair.clone();
             let voting_keypair = keys.vote_keypair.clone();
             let validator_config = safe_clone_config(validator_config);
             let genesis_config = self.genesis_config.clone();
-            let entry_points = vec![self.entry_point_info.clone()];
+            let mut entry_points = vec![self.entry_point_info.clone()];
+            if peers_as_extra_entrypoints {
+                entry_points.extend(
+                    peer_infos
+                        .iter()
+                        .enumerate()
+                        .filter(|(peer_index, _)| *peer_index != i)
+                        .map(|(_, info)| info.clone()),
+                );
+            }
 
             let handle = std::thread::spawn(move || {
                 let validator_pubkey = validator_keypair.pubkey();
-                info!("Starting validator {validator_pubkey}");
+                info!(
+                    "Starting validator {validator_pubkey} with {} entrypoint(s)",
+                    entry_points.len()
+                );
 
-                let validator_node = Node::new_localhost_with_pubkey(&validator_keypair.pubkey());
                 let contact_info = validator_node.info.clone();
                 let (ledger_path, _blockhash) = create_new_tmp_ledger!(&genesis_config);
 
